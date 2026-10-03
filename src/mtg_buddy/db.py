@@ -1,67 +1,91 @@
-import pathlib as pt
-import sqlite3 as sql
-import requests as rq
-import logging
 import gzip
+import json
+import logging
+import os
+import shutil
 import tempfile
-import hashlib
+
+from pathlib import Path
+
+import requests
 
 
-db_path = pt.Path.cwd() / 'data/'
-db_file = db_path / 'AllPrintings.sqlite'
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DATA_DIR = PROJECT_ROOT / 'data'
+DB_FILE = DATA_DIR / 'AllPrintings.sqlite'
+META_FILE = DATA_DIR / 'Meta.json'
 
-url = 'https://mtgjson.com/api/v5/AllPrintings.sqlite.gz'
+DB_URL = 'https://mtgjson.com/api/v5/AllPrintings.sqlite.gz'
+META_URL = 'https://mtgjson.com/api/v5/Meta.json'
+TIMEOUT = 15
 
-logging_file = '/var/log/mtg-buddy.log'
+log = logging.getLogger(__name__)
 
-logging.basicConfig(filename=logging_file, 
-                        format='%(asctime)s - %(levelname)s - %(message)s',
-                        datefmt='%Y-%m-%d %H:%M:%S',
-                        level=logging.INFO)
+def fetch_remote_meta() -> dict:
+    response = requests.get(META_URL, timeout=TIMEOUT)
+    response.raise_for_status()
+    return response.json()
 
-def check_db():
 
-    if not pt.Path(db_path).exists(follow_symlinks=False):
-        logging.info('Creating data dir')
-        pt.Path.mkdir(db_path)
-        logging.info('Data dir created successfully')
+def read_local_meta() -> dict | None:
+    if not META_FILE.exists():
+        return None
 
-    if not pt.Path(db_file).exists(follow_symlinks=False):
-        download_db()
+    try:
+        return json.loads(META_FILE.read_text(encoding='utf-8'))
+    except json.JSONDecodeError:
+        log.warning('Local Meta.json is corrupt, ignoring it')
+        return None
 
-    is_db_outdated()
 
-def download_db():
-    
-    response = rq.get(url)
-    
-    if(response.status_code == 200):
-        with open(db_file, "wb") as file:
-            file.write(gzip.decompress(response.content))
-        logging.info("DB file sucessfully downloaded")
+def download_db() -> None:
+    #Temp file lives in DATA_DIR so the final replace is an atomic rename on the same filesystem
+    fd, tmp_name = tempfile.mkstemp(dir=DATA_DIR, suffix='.sqlite.tmp')
+    os.close(fd)
+    db_temp = Path(tmp_name)
+
+    try:
+        with requests.get(DB_URL, stream=True, timeout=TIMEOUT) as response:
+            response.raise_for_status()
+
+            #Decompress while streaming so we never write the .gz to disk
+            with gzip.GzipFile(fileobj=response.raw) as src, db_temp.open('wb') as dst:
+                shutil.copyfileobj(src, dst, 1 << 20)
+
+        db_temp.replace(DB_FILE)
+    finally:
+        db_temp.unlink(missing_ok=True)
+
+
+def check_db() -> None:
+
+    #Create data directory if it doesn't already exist
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+    try:
+        remote_meta = fetch_remote_meta()
+    except requests.RequestException as e:
+        if DB_FILE.exists():
+            log.warning('Could not reach MTGJSON (%s), using local DB', e)
+            return
+        raise
+
+    remote_version = remote_meta['meta']['version']
+    local_meta = read_local_meta()
+
+    if not DB_FILE.exists():
+        log.info('No local DB found')
+    elif local_meta is None:
+        log.info('Missing Meta.json, cannot confirm DB version')
+    elif local_meta['meta']['version'] != remote_version:
+        log.info('DB is out of date (%s -> %s)', local_meta['meta']['version'], remote_version)
     else:
-        logging.info('Failed to download DB file. Status Code:', response.status_code)
+        log.info('DB is up to date (%s)', remote_version)
+        return
 
-def is_db_outdated():
+    log.info('Downloading DB %s', remote_version)
+    download_db()
 
-    response = rq.get(url + '.sha256')
-        
-    if(response.status_code == 200):
-        with tempfile.TemporaryFile() as temp:
-            temp.write(response.content)
-
-            logging.info("Sucessfully downloaded checksum")
-
-            downloded_checksum = temp.read()
-
-            with open(db_file, 'rb') as file:
-                current_checksum = hashlib.file_digest(file, "sha256").hexdigest()
-
-            if downloded_checksum != current_checksum:
-                logging.info('DB is outdated redownloading')
-                download_db()
-
-        logging.info("DB is up to date")
-    else:
-        logging.info('Failed to download checksum file. Status Code:', response.status_code)
-    
+    #Only record the new version once the DB has actually been swapped in
+    META_FILE.write_text(json.dumps(remote_meta), encoding='utf-8')
+    log.info('DB updated to %s', remote_version)

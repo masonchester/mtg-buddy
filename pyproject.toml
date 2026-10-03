@@ -1,0 +1,12 @@
+[project]
+name = "mtg-buddy"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = ["requests"]
+
+[project.scripts]
+mtg-buddy = "mtg_buddy.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

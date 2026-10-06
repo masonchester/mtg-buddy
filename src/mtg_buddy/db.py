@@ -39,7 +39,6 @@ def read_local_meta() -> dict | None:
 
 
 def download_db() -> None:
-    #Temp file lives in DATA_DIR so the final replace is an atomic rename on the same filesystem
     fd, tmp_name = tempfile.mkstemp(dir=DATA_DIR, suffix='.sqlite.tmp')
     os.close(fd)
     db_temp = Path(tmp_name)
@@ -48,7 +47,6 @@ def download_db() -> None:
         with requests.get(DB_URL, stream=True, timeout=TIMEOUT) as response:
             response.raise_for_status()
 
-            #Decompress while streaming so we never write the .gz to disk
             with gzip.GzipFile(fileobj=response.raw) as src, db_temp.open('wb') as dst:
                 shutil.copyfileobj(src, dst, 1 << 20)
 
@@ -59,7 +57,6 @@ def download_db() -> None:
 
 def check_db() -> None:
 
-    #Create data directory if it doesn't already exist
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
     try:

@@ -1,6 +1,6 @@
-from mtg_buddy import db
+import asyncio
+from mtg_buddy import db, agents, tool
 import logging
-
 
 log = logging.getLogger()
 
@@ -14,7 +14,21 @@ def main():
 
     log.info("Validating DB")
     db.check_db()
-    log.info("Validation succeded")
+    chat()
 
+def chat():
+    while True:
+        try:
+            user = input("> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            break
+        if not user:
+            continue
+        if user.lower() in {'quit', 'exit'}:
+            break
+
+        results = asyncio.run(agents.run_agent(user))
+
+        print(results)
 if __name__ == "__main__":
     main()
